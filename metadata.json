@@ -1,0 +1,8 @@
+{
+  "name": "Video Dubber V4.1",
+  "description": "Made by:  aigolden\nhttps://www.youtube.com/@aigolden",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

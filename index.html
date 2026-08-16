@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Google AI Studio App</title>
+    <script>
+      // Silence benign HMR/WebSocket errors to prevent unhandled rejection crashes or overlays
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event.reason;
+        var message = (reason && (reason.message || String(reason))) || '';
+        if (
+          message.indexOf('WebSocket') !== -1 ||
+          message.indexOf('websocket') !== -1 ||
+          message.indexOf('closed without opened') !== -1 ||
+          message.indexOf('WS') !== -1
+        ) {
+          console.warn('Intercepted and suppressed benign HMR WebSocket rejection:', message);
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+
+      window.addEventListener('error', function(event) {
+        var message = event.message || '';
+        if (
+          message.indexOf('WebSocket') !== -1 ||
+          message.indexOf('websocket') !== -1 ||
+          message.indexOf('closed without opened') !== -1 ||
+          message.indexOf('WS') !== -1
+        ) {
+          console.warn('Intercepted and suppressed benign HMR WebSocket error:', message);
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
