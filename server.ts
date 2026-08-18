@@ -58,64 +58,78 @@ async function fetchProxiesList(): Promise<string[]> {
   }
 }
 
-// Execute yt-dlp command using parallel proxy racing to find a working proxy fast
-async function execWithProxyRotation(
-  cmdBuilder: (proxyArg: string) => string,
-  maxAttempts = 40
-): Promise<{ stdout: string; stderr: string }> {
-  const ytArgs = `--no-warnings --extractor-args "youtube:player_client=mweb,android,ios,web"`;
+// Locate yt-dlp binary across environments (Colab global PATH, /usr/local/bin, or local)
+function getYtDlpBin(): string {
+  if (fs.existsSync("/usr/local/bin/yt-dlp")) return "/usr/local/bin/yt-dlp";
+  if (fs.existsSync("/usr/bin/yt-dlp")) return "/usr/bin/yt-dlp";
+  if (fs.existsSync("./yt-dlp")) return "./yt-dlp";
+  return "yt-dlp";
+}
 
-  // 1. Try cached working proxy first
+// Execute yt-dlp command using direct fast attempt first, then proxy racing fallback
+async function execWithProxyRotation(
+  cmdBuilder: (proxyArg: string, ytBin: string) => string,
+  maxAttempts = 30
+): Promise<{ stdout: string; stderr: string }> {
+  const ytBin = getYtDlpBin();
+  const ytArgs = `--no-warnings --no-check-certificates --geo-bypass --extractor-args "youtube:player_client=android,mweb,web_creator,ios"`;
+
+  // 1. Direct fast attempt (Android client bypasses YouTube bot detection reliably in Colab)
+  try {
+    const cmd = cmdBuilder(ytArgs, ytBin);
+    console.log(`Executing direct yt-dlp command: ${cmd}`);
+    const res = await execAsync(cmd, { timeout: 60000 });
+    return res;
+  } catch (directErr: any) {
+    console.warn("Direct yt-dlp attempt failed, proceeding to proxy fallback...", directErr.message);
+  }
+
+  // 2. Try cached working proxy if available
   if (cachedProxy) {
     try {
       console.log(`Trying cached working proxy: ${cachedProxy}`);
-      const cmd = cmdBuilder(`--proxy "${cachedProxy}" --socket-timeout 6 ${ytArgs}`);
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 45000 });
-      return { stdout, stderr };
+      const cmd = cmdBuilder(`--proxy "${cachedProxy}" --socket-timeout 8 ${ytArgs}`, ytBin);
+      const res = await execAsync(cmd, { timeout: 45000 });
+      return res;
     } catch (err: any) {
       console.warn(`Cached proxy ${cachedProxy} failed. Resetting proxy cache.`);
       cachedProxy = null;
     }
   }
 
-  // 2. Fetch fresh public proxy list
+  // 3. Fetch fresh public proxy list
   const proxies = await fetchProxiesList();
-  if (proxies.length === 0) {
-    // Fallback attempt without proxy if list fetch failed
-    const cmd = cmdBuilder(`--socket-timeout 6 ${ytArgs}`);
-    return await execAsync(cmd, { timeout: 45000 });
-  }
+  if (proxies.length > 0) {
+    const shuffled = proxies.sort(() => 0.5 - Math.random()).slice(0, maxAttempts);
+    console.log(`Fetched ${proxies.length} proxies. Running parallel proxy racing on ${shuffled.length} candidates...`);
 
-  // Shuffle proxy list
-  const shuffled = proxies.sort(() => 0.5 - Math.random()).slice(0, maxAttempts);
-  console.log(`Fetched ${proxies.length} proxies. Running parallel proxy racing on ${shuffled.length} candidates...`);
-
-  const BATCH_SIZE = 10;
-  for (let i = 0; i < shuffled.length; i += BATCH_SIZE) {
-    const batch = shuffled.slice(i, i + BATCH_SIZE);
-    try {
-      const winner = await Promise.any(
-        batch.map(async (proxy) => {
-          const cmd = cmdBuilder(`--proxy "${proxy}" --socket-timeout 6 ${ytArgs}`);
-          const res = await execAsync(cmd, { timeout: 25000 });
-          cachedProxy = proxy; // Cache the winning proxy
-          console.log(`Successfully found working proxy: ${proxy}`);
-          return res;
-        })
-      );
-      return winner;
-    } catch (err: any) {
-      // Batch failed, proceed to next parallel batch
+    const BATCH_SIZE = 8;
+    for (let i = 0; i < shuffled.length; i += BATCH_SIZE) {
+      const batch = shuffled.slice(i, i + BATCH_SIZE);
+      try {
+        const winner = await Promise.any(
+          batch.map(async (proxy) => {
+            const cmd = cmdBuilder(`--proxy "${proxy}" --socket-timeout 8 ${ytArgs}`, ytBin);
+            const res = await execAsync(cmd, { timeout: 25000 });
+            cachedProxy = proxy; // Cache the winning proxy
+            console.log(`Successfully found working proxy: ${proxy}`);
+            return res;
+          })
+        );
+        return winner;
+      } catch (err: any) {
+        // Batch failed, proceed to next parallel batch
+      }
     }
   }
 
-  // Fallback to direct connection if all proxies in batch race failed
+  // 4. Final fallback attempt with tv_embedded client
   try {
-    console.warn("Proxy racing failed, attempting direct connection as last resort...");
-    const cmd = cmdBuilder(`--socket-timeout 8 ${ytArgs}`);
+    const fallbackArgs = `--no-warnings --no-check-certificates --geo-bypass --extractor-args "youtube:player_client=tv_embedded,web"`;
+    const cmd = cmdBuilder(fallbackArgs, ytBin);
     return await execAsync(cmd, { timeout: 60000 });
   } catch (err: any) {
-    throw new Error("دانلود ویدیو از یوتیوب امکان‌پذیر نشد. لطفاً چند دقیقه دیگر مجدداً تلاش کنید.");
+    throw new Error("دانلود ویدیو از یوتیوب امکان‌پذیر نشد. لطفاً از اتصال اینترنت یا در دسترس بودن ویدیو اطمینان حاصل فرمایید.");
   }
 }
 
@@ -1659,8 +1673,8 @@ app.post("/api/youtube-import", async (req: any, res: any) => {
 
         // Try primary video download with fast parallel proxy racing
         try {
-          await execWithProxyRotation((proxyArg) =>
-            `./yt-dlp ${proxyArg} --js-runtimes node -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best/ba/b" --merge-output-format mp4 -o "${destPath}" --no-playlist "${cleanUrl}"`
+          await execWithProxyRotation((proxyArg, ytBin) =>
+            `"${ytBin}" ${proxyArg} --js-runtimes node -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best/ba/b" --merge-output-format mp4 -o "${destPath}" --no-playlist "${cleanUrl}"`
           );
           if (fs.existsSync(destPath) && fs.statSync(destPath).size > 1000) {
             downloaded = true;
@@ -1674,8 +1688,8 @@ app.post("/api/youtube-import", async (req: any, res: any) => {
         // Fallback: Audio-only stream download
         if (!downloaded) {
           try {
-            await execWithProxyRotation((proxyArg) =>
-              `./yt-dlp ${proxyArg} --js-runtimes node -f "ba/bestaudio/best" -o "${destPath}" --no-playlist "${cleanUrl}"`
+            await execWithProxyRotation((proxyArg, ytBin) =>
+              `"${ytBin}" ${proxyArg} --js-runtimes node -f "ba/bestaudio/best" -o "${destPath}" --no-playlist "${cleanUrl}"`
             );
             if (fs.existsSync(destPath) && fs.statSync(destPath).size > 1000) {
               downloaded = true;
