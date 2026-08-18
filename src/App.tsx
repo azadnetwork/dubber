@@ -34,6 +34,12 @@ import {
   Link2,
   Cloud,
   Folder,
+  FolderOpen,
+  HardDrive,
+  CornerLeftUp,
+  RefreshCw,
+  FileVideo,
+  FileAudio,
   LogOut,
   Globe,
   Terminal,
@@ -189,6 +195,19 @@ export default function App() {
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [driveError, setDriveError] = useState<string | null>(null);
 
+  // Colab Direct Google Drive Explorer State (No OAuth required)
+  const [colabDriveMode, setColabDriveMode] = useState<"colab" | "oauth">("colab");
+  const [colabDrivePath, setColabDrivePath] = useState<string>("");
+  const [colabDriveFolders, setColabDriveFolders] = useState<Array<{ name: string; path: string }>>([]);
+  const [colabDriveFiles, setColabDriveFiles] = useState<Array<{ name: string; path: string; size: number; sizeFormatted: string; isVideo: boolean; isAudio: boolean; ext: string }>>([]);
+  const [colabDriveParent, setColabDriveParent] = useState<string | null>(null);
+  const [colabAvailableRoots, setColabAvailableRoots] = useState<string[]>([]);
+  const [isColabDriveMounted, setIsColabDriveMounted] = useState<boolean>(true);
+  const [isColabDriveLoading, setIsColabDriveLoading] = useState<boolean>(false);
+  const [colabDriveError, setColabDriveError] = useState<string | null>(null);
+  const [colabCustomPathInput, setColabCustomPathInput] = useState<string>("");
+  const [colabFileSearch, setColabFileSearch] = useState<string>("");
+
   // Google Drive saving state
   const [isSavingToDrive, setIsSavingToDrive] = useState<{[key: string]: boolean}>({});
   const [saveToDriveResult, setSaveToDriveResult] = useState<{[key: string]: string | null}>({});
@@ -260,6 +279,123 @@ export default function App() {
       setIsDriveLoading(false);
     }
   }, []);
+
+  // Direct Colab / Server Google Drive Explorer Fetcher (No OAuth)
+  const fetchColabDrive = useCallback(async (dirPath?: string) => {
+    setIsColabDriveLoading(true);
+    setColabDriveError(null);
+    try {
+      const queryParam = dirPath ? `?dirPath=${encodeURIComponent(dirPath)}` : "";
+      const response = await fetch(`/api/colab-drive/list${queryParam}`);
+      if (!response.ok) {
+        throw new Error(`Server returned status ${response.status}`);
+      }
+      const data = await response.json();
+      if (!data.success && data.error) {
+        setColabDriveError(data.error);
+      }
+      setIsColabDriveMounted(data.isDriveMounted ?? true);
+      setColabDrivePath(data.currentPath || dirPath || "");
+      setColabCustomPathInput(data.currentPath || dirPath || "");
+      setColabDriveParent(data.parentPath || null);
+      setColabAvailableRoots(data.availableRoots || []);
+      setColabDriveFolders(data.folders || []);
+      setColabDriveFiles(data.files || []);
+    } catch (err: any) {
+      console.error("Error listing Colab drive files:", err);
+      setColabDriveError(err.message || "خطا در دریافت لیست فایل‌ها از سرور/کولب.");
+    } finally {
+      setIsColabDriveLoading(false);
+    }
+  }, []);
+
+  // Auto-fetch Colab drive when Drive tab is opened in Colab mode
+  useEffect(() => {
+    if (driveActiveTab === "drive" && colabDriveMode === "colab") {
+      fetchColabDrive(colabDrivePath || undefined);
+    }
+  }, [driveActiveTab, colabDriveMode, fetchColabDrive]);
+
+  // Colab Direct Import and Transcribe Handler
+  const handleColabDriveImport = async (targetFilePath: string, targetFileName?: string) => {
+    if (!targetFilePath.trim()) {
+      setUploadError("لطفاً مسیر فایل مورد نظر در کولب یا گوگل درایو را مشخص کنید.");
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadError(null);
+    setUploadProgress(5);
+    setTranscribeMessage("در حال بارگذاری فایل انتخاب‌شده از کولب/درایو...");
+    setTranscribeLogs([`📁 انتخاب فایل محلی: ${targetFilePath}`]);
+
+    try {
+      const response = await fetch("/api/colab-drive/import", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-gemini-api-key": customApiKey,
+        },
+        body: JSON.stringify({
+          filePath: targetFilePath.trim(),
+          fileName: targetFileName,
+          apiKey: customApiKey,
+        }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || "خطا در فراخوانی فایل از کولب.");
+      }
+
+      const { jobId } = await response.json();
+      if (!jobId) {
+        throw new Error("شناسه فرآیند پردازش دریافت نشد.");
+      }
+
+      setUploadProgress(15);
+      setTranscribeMessage("فایل روی سرور بارگذاری شد. شروع پردازش صوتی و استخراج دیالوگ‌ها...");
+
+      let isCompleted = false;
+      while (!isCompleted) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        const statusRes = await fetch(`/api/transcribe-status/${jobId}`);
+        if (!statusRes.ok) {
+          throw new Error("خطا در دریافت وضعیت فرآیند از سرور.");
+        }
+
+        const jobData = await statusRes.json();
+        setUploadProgress(jobData.progress || 15);
+        setTranscribeMessage(jobData.message || "در حال پردازش...");
+        if (jobData.logs && Array.isArray(jobData.logs)) {
+          setTranscribeLogs(jobData.logs);
+        }
+
+        if (jobData.status === "completed") {
+          setFileId(jobData.fileId);
+          setFileName(jobData.fileName);
+          setFileType(jobData.fileType);
+
+          const sanitizedSegments = (jobData.segments || []).map((seg: any, idx: number) => ({
+            ...seg,
+            id: idx + 1,
+          }));
+          setSegments(sanitizedSegments);
+          setUploadProgress(100);
+          isCompleted = true;
+        } else if (jobData.status === "failed") {
+          throw new Error(jobData.error || jobData.message || "عملیات با خطا مواجه شد.");
+        }
+      }
+    } catch (err: any) {
+      console.error("Colab Drive import error:", err);
+      setUploadError(err.message || "خطایی در حین فراخوانی یا پردازش فایل رخ داد.");
+    } finally {
+      setIsUploading(false);
+      setTranscribeMessage("");
+    }
+  };
 
   useEffect(() => {
     const unsubscribe = initAuth(
@@ -572,6 +708,38 @@ export default function App() {
     } catch (err: any) {
       console.error("Save to drive error:", err);
       setSaveToDriveResult(prev => ({ ...prev, [targetKey]: `خطا در ذخیره‌سازی: ${err.message}` }));
+    } finally {
+      setIsSavingToDrive(prev => ({ ...prev, [targetKey]: false }));
+    }
+  };
+
+  const handleSaveToColabDrive = async (fileNameOnServer: string, targetKey: "main" | "audio") => {
+    setIsSavingToDrive(prev => ({ ...prev, [targetKey]: true }));
+    try {
+      const res = await fetch("/api/colab-drive/save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          file: fileNameOnServer
+        })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "خطا در ارتباط با سرور");
+      }
+
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || "خطا در ذخیره فایل");
+      }
+
+      setSaveToDriveResult(prev => ({ ...prev, [targetKey]: `فایل با موفقیت در پوشه درایو ذخیره شد: ${data.savedPath}` }));
+    } catch (err: any) {
+      console.error("Colab drive save error:", err);
+      setSaveToDriveResult(prev => ({ ...prev, [targetKey]: `خطا در ذخیره‌سازی در درایو کولب: ${err.message}` }));
     } finally {
       setIsSavingToDrive(prev => ({ ...prev, [targetKey]: false }));
     }
@@ -1764,142 +1932,410 @@ export default function App() {
 
               {/* View 2: Google Drive Tab */}
               {!isUploading && driveActiveTab === "drive" && (
-                <div className="bg-[#0c0e14] border border-[#202738] rounded-2xl p-6 min-h-[300px] flex flex-col justify-center">
-                  {!driveUser ? (
-                    /* Google Sign In Call-To-Action */
-                    <div className="text-center py-6 flex flex-col items-center justify-center max-w-lg mx-auto">
-                      <div className="w-16 h-16 rounded-full bg-cyan-950/40 text-cyan-400 flex items-center justify-center mb-4 border border-cyan-800/30">
-                        <Cloud className="w-7 h-7" />
-                      </div>
-                      <h3 className="text-lg font-bold mb-2">اتصال مستقیم به گوگل درایو (Google Drive)</h3>
-                      <p className="text-xs text-slate-400 leading-relaxed mb-6" dir="rtl">
-                        به دلیل سرعت پایین و پایداری کم اینترنت در آپلود مستقیم فایل‌های بزرگ ۴۰+ مگابایت، پیشنهاد می‌شود فایل‌های ویدیویی یا صوتی خود را ابتدا روی گوگل درایو خود آپلود کنید. سپس با ورود ایمن به حساب گوگل درایو خود از کادر زیر، فایل را با سرعت استثنایی و مستقیم روی سرور ما بدون مصرف ترافیک اینترنت خود فراخوانی کنید!
-                      </p>
-                      <button
-                        onClick={handleDriveSignIn}
-                        disabled={isDriveLoading}
-                        className="flex items-center gap-3 px-6 py-3.5 bg-white hover:bg-slate-100 text-slate-900 rounded-xl font-bold text-xs transition-all active:scale-98 shadow-xl shadow-white/5 cursor-pointer disabled:opacity-50"
-                      >
-                        {isDriveLoading ? (
-                          <Loader2 className="w-4 h-4 animate-spin text-slate-900" />
-                        ) : (
-                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
-                            <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
-                            <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.85z" fill="#FBBC05" />
-                            <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.85c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
-                          </svg>
-                        )}
-                        <span>ورود امن با حساب گوگل و انتخاب فایل</span>
-                      </button>
-                    </div>
-                  ) : (
-                    /* Drive Connected View - Files list */
-                    <div className="flex flex-col gap-4">
-                      {/* Connection Header bar */}
-                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-[#131722] border border-[#202738] rounded-xl px-4 py-3" dir="rtl">
-                        <div className="flex items-center gap-3">
-                          {driveUser.photoURL ? (
-                            <img src={driveUser.photoURL} alt="Avatar" className="w-8 h-8 rounded-full border border-cyan-500/30" referrerPolicy="no-referrer" />
-                          ) : (
-                            <div className="w-8 h-8 rounded-full bg-cyan-950 text-cyan-400 flex items-center justify-center font-bold text-xs">
-                              {driveUser.email ? driveUser.email[0].toUpperCase() : "G"}
+                <div className="bg-[#0c0e14] border border-[#202738] rounded-2xl p-4 sm:p-6 min-h-[300px] flex flex-col justify-center">
+                  {/* Mode switcher within Drive Tab */}
+                  <div className="flex p-1 bg-[#10141e] border border-[#202738] rounded-xl max-w-lg mx-auto w-full mb-5" dir="rtl">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setColabDriveMode("colab");
+                        fetchColabDrive(colabDrivePath || undefined);
+                      }}
+                      className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                        colabDriveMode === "colab"
+                          ? "bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <HardDrive className="w-3.5 h-3.5" />
+                      <span>مرورگر مستقیم درایو در کولب</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setColabDriveMode("oauth")}
+                      className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                        colabDriveMode === "oauth"
+                          ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <Cloud className="w-3.5 h-3.5" />
+                      <span>اتصال با لاگین گوگل (OAuth)</span>
+                    </button>
+                  </div>
+
+                  {colabDriveMode === "colab" ? (
+                    /* Colab Direct Drive & Local Server Explorer */
+                    <div className="flex flex-col gap-4" dir="rtl">
+                      {/* Mount status header */}
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-[#131722] border border-[#202738] rounded-xl p-3.5">
+                        <div className="flex items-center gap-3 w-full sm:w-auto">
+                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                            isColabDriveMounted
+                              ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/40"
+                              : "bg-amber-950/40 text-amber-400 border-amber-800/40"
+                          }`}>
+                            <HardDrive className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-xs font-bold text-slate-100">مسیر حافظه مستقیم در سرور و کولب</h4>
+                              {isColabDriveMounted ? (
+                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-bold border border-emerald-500/20">
+                                  🟢 گوگل درایو متصل است
+                                </span>
+                              ) : (
+                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-bold border border-amber-500/20">
+                                  🟡 حافظه محلی فعال (درایو Mount نشده)
+                                </span>
+                              )}
                             </div>
-                          )}
-                          <div className="text-right">
-                            <p className="text-xs font-bold text-slate-100">{driveUser.displayName || "کاربر گوگل"}</p>
-                            <p className="text-[10px] text-slate-400">{driveUser.email}</p>
+                            <p className="text-[11px] text-slate-400 mt-0.5 font-mono dir-ltr text-right">
+                              {colabDrivePath || "/content/drive/MyDrive"}
+                            </p>
                           </div>
                         </div>
-                        <button
-                          onClick={handleDriveSignOut}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 hover:text-red-400 rounded-lg text-[10px] font-bold text-slate-300 transition-all cursor-pointer"
-                        >
-                          <LogOut className="w-3.5 h-3.5" />
-                          <span>خروج از حساب</span>
-                        </button>
-                      </div>
 
-                      {/* Search Bar & Refresh */}
-                      <div className="flex gap-2">
-                        <div className="relative flex-1">
-                          <input
-                            type="text"
-                            placeholder="جستجو در فایل‌های گوگل درایو..."
-                            value={driveSearchQuery}
-                            onChange={(e) => setDriveSearchQuery(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && driveToken) {
-                                fetchDriveFiles(driveToken, driveSearchQuery);
-                              }
-                            }}
-                            className="w-full bg-[#131722] border border-[#202738] rounded-xl pl-3 pr-10 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 text-right"
-                            dir="rtl"
-                          />
-                          <Search className="absolute right-3.5 top-3 w-4 h-4 text-slate-500" />
+                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                          {colabDriveParent && (
+                            <button
+                              type="button"
+                              onClick={() => fetchColabDrive(colabDriveParent)}
+                              disabled={isColabDriveLoading}
+                              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                              title="بازگشت به پوشه والد"
+                            >
+                              <CornerLeftUp className="w-3.5 h-3.5" />
+                              <span>پوشه قبلی</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => fetchColabDrive(colabDrivePath || undefined)}
+                            disabled={isColabDriveLoading}
+                            className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-400 rounded-lg transition-all cursor-pointer disabled:opacity-50"
+                            title="بروزرسانی لیست"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${isColabDriveLoading ? "animate-spin text-cyan-400" : ""}`} />
+                          </button>
                         </div>
+                      </div>
+
+                      {/* Quick Location Shortcuts */}
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="text-[11px] text-slate-400 font-bold">مسیرهای سریع:</span>
                         <button
-                          onClick={() => driveToken && fetchDriveFiles(driveToken, driveSearchQuery)}
-                          disabled={isDriveLoading}
-                          className="px-4 bg-[#131722] hover:bg-slate-800 border border-[#202738] rounded-xl text-xs font-semibold text-slate-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          type="button"
+                          onClick={() => fetchColabDrive("/content/drive/MyDrive")}
+                          className="px-2.5 py-1 bg-[#151a27] hover:bg-cyan-950/60 hover:text-cyan-300 border border-[#202738] rounded-lg text-[11px] font-semibold text-slate-300 transition-all cursor-pointer flex items-center gap-1.5"
                         >
-                          {isDriveLoading ? <Loader2 className="w-4 h-4 animate-spin text-slate-400" /> : "جستجو"}
+                          <Folder className="w-3 h-3 text-cyan-400" />
+                          <span>گوگل درایو (MyDrive)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => fetchColabDrive("/content")}
+                          className="px-2.5 py-1 bg-[#151a27] hover:bg-slate-800 border border-[#202738] rounded-lg text-[11px] font-semibold text-slate-300 transition-all cursor-pointer flex items-center gap-1.5"
+                        >
+                          <HardDrive className="w-3 h-3 text-slate-400" />
+                          <span>روت کولب (/content)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => fetchColabDrive("uploads")}
+                          className="px-2.5 py-1 bg-[#151a27] hover:bg-slate-800 border border-[#202738] rounded-lg text-[11px] font-semibold text-slate-300 transition-all cursor-pointer flex items-center gap-1.5"
+                        >
+                          <FolderOpen className="w-3 h-3 text-purple-400" />
+                          <span>پوشه آپلودها (uploads)</span>
                         </button>
                       </div>
 
-                      {/* Drive error box */}
-                      {driveError && (
-                        <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-xl text-xs text-right" dir="rtl">
-                          {driveError}
+                      {/* Manual Path Input Form */}
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (colabCustomPathInput.trim()) {
+                            // Check if path is directly a file
+                            const isDirectFile = /\.(mp4|mkv|avi|mov|webm|mp3|wav|m4a|flac|aac)$/i.test(colabCustomPathInput.trim());
+                            if (isDirectFile) {
+                              handleColabDriveImport(colabCustomPathInput.trim());
+                            } else {
+                              fetchColabDrive(colabCustomPathInput.trim());
+                            }
+                          }
+                        }}
+                        className="flex gap-2"
+                      >
+                        <input
+                          type="text"
+                          placeholder="آدرس دقیق پوشه یا فایل در کولب... (مثال: /content/drive/MyDrive/video.mp4)"
+                          value={colabCustomPathInput}
+                          onChange={(e) => setColabCustomPathInput(e.target.value)}
+                          className="flex-1 bg-[#131722] border border-[#202738] rounded-xl px-3.5 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 font-mono text-left dir-ltr"
+                        />
+                        <button
+                          type="submit"
+                          disabled={isColabDriveLoading}
+                          className="px-4 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs rounded-xl transition-all cursor-pointer disabled:opacity-50 shrink-0"
+                        >
+                          برو به مسیر
+                        </button>
+                      </form>
+
+                      {/* Error notice if any */}
+                      {colabDriveError && (
+                        <div className="bg-amber-500/10 border border-amber-500/20 text-amber-300 p-3 rounded-xl text-xs flex items-start gap-2.5">
+                          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <p className="font-bold mb-1">{colabDriveError}</p>
+                            {!isColabDriveMounted && (
+                              <div className="mt-2 p-2 bg-slate-900/80 rounded-lg text-[11px] text-slate-300 border border-slate-700/50">
+                                <p className="mb-1 text-slate-400">برای اتصال مستقیم گوگل درایو، این دستور را در سلول کولب اجرا فرمایید:</p>
+                                <code className="text-cyan-300 font-mono select-all font-bold block dir-ltr text-left">
+                                  from google.colab import drive; drive.mount('/content/drive')
+                                </code>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
 
-                      {/* Files list container */}
-                      <div className="border border-[#202738] bg-[#10141e] rounded-xl overflow-hidden max-h-[300px] overflow-y-auto">
-                        {isDriveLoading ? (
-                          <div className="py-16 text-center flex flex-col items-center justify-center gap-2">
-                            <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
-                            <p className="text-xs text-slate-400">در حال دریافت لیست فایل‌های ویدیویی و صوتی گوگل درایو شما...</p>
+                      {/* Filter Search */}
+                      {colabDriveFiles.length > 3 && (
+                        <div className="relative">
+                          <input
+                            type="text"
+                            placeholder="فیلتر کردن فایل‌های این پوشه..."
+                            value={colabFileSearch}
+                            onChange={(e) => setColabFileSearch(e.target.value)}
+                            className="w-full bg-[#10141e] border border-[#202738] rounded-xl pl-3 pr-9 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                          />
+                          <Search className="absolute right-3 top-2.5 w-3.5 h-3.5 text-slate-500" />
+                        </div>
+                      )}
+
+                      {/* Folders & Files Browser Container */}
+                      <div className="border border-[#202738] bg-[#10141e] rounded-xl overflow-hidden min-h-[160px] max-h-[340px] overflow-y-auto">
+                        {isColabDriveLoading ? (
+                          <div className="py-14 text-center flex flex-col items-center justify-center gap-2">
+                            <Loader2 className="w-7 h-7 text-cyan-400 animate-spin" />
+                            <p className="text-xs text-slate-400">در حال خواندن فایل‌های درایو در حافظه کولب...</p>
                           </div>
-                        ) : driveFiles.length === 0 ? (
-                          <div className="py-16 text-center text-slate-400 px-6">
-                            <p className="text-xs font-bold mb-1">هیچ فایل ویدیو یا صوتی پیدا نشد!</p>
-                            <p className="text-[10px] text-slate-500 max-w-xs mx-auto leading-relaxed">
-                              مطمئن شوید فایل‌های با پسوند ویدیویی (MP4, MKV) یا صوتی (MP3, WAV) در روت یا پوشه‌های درایو شما آپلود شده‌اند.
+                        ) : colabDriveFolders.length === 0 && colabDriveFiles.length === 0 ? (
+                          <div className="py-12 text-center text-slate-400 px-6">
+                            <Folder className="w-10 h-10 text-slate-600 mx-auto mb-2 opacity-50" />
+                            <p className="text-xs font-bold mb-1">این پوشه خالی است یا فایل ویدیویی/صوتی در آن وجود ندارد.</p>
+                            <p className="text-[10px] text-slate-500 max-w-sm mx-auto leading-relaxed mt-1">
+                              فایل‌های ویدیویی (MP4, MKV, AVI) یا صوتی خود را داخل گوگل درایو یا پوشه /content کولب قرار دهید.
                             </p>
                           </div>
                         ) : (
-                          <div className="divide-y divide-[#1b202c]">
-                            {driveFiles.map((file) => {
-                              const isVideoType = file.mimeType?.startsWith("video/") || file.name.endsWith(".mp4") || file.name.endsWith(".mkv") || file.name.endsWith(".avi");
-                              const fileSizeMb = file.size ? (parseInt(file.size, 10) / (1024 * 1024)).toFixed(1) + " MB" : "اندازه نامشخص";
-                              return (
-                                <div
-                                  key={file.id}
-                                  className="flex items-center justify-between p-3.5 hover:bg-[#131722] transition-colors"
-                                >
-                                  <button
-                                    onClick={() => handleDriveImport(file)}
-                                    className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 font-extrabold text-xs rounded-lg transition-all shadow-md shadow-cyan-500/10 hover:shadow-cyan-500/20 cursor-pointer flex items-center gap-1.5"
+                          <div className="flex flex-col">
+                            {/* Subfolders list */}
+                            {colabDriveFolders.length > 0 && (
+                              <div className="p-2.5 bg-[#0b0e14] border-b border-[#1b202c]">
+                                <p className="text-[10px] font-bold text-slate-400 mb-2">📁 پوشه‌های داخل این مسیر ({colabDriveFolders.length}):</p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                  {colabDriveFolders.map((folder) => (
+                                    <button
+                                      key={folder.path}
+                                      type="button"
+                                      onClick={() => fetchColabDrive(folder.path)}
+                                      className="flex items-center gap-2 p-2 rounded-lg bg-[#141926] hover:bg-cyan-950/40 hover:border-cyan-500/40 border border-[#202738] text-right transition-all cursor-pointer group"
+                                    >
+                                      <Folder className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform shrink-0" />
+                                      <span className="text-xs font-medium text-slate-200 group-hover:text-cyan-300 truncate">
+                                        {folder.name}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Media Files list */}
+                            <div className="divide-y divide-[#1b202c]">
+                              {colabDriveFiles
+                                .filter((f) => !colabFileSearch.trim() || f.name.toLowerCase().includes(colabFileSearch.toLowerCase()))
+                                .map((file) => (
+                                  <div
+                                    key={file.path}
+                                    className="flex items-center justify-between p-3 hover:bg-[#131722] transition-colors"
                                   >
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                    <span>پردازش فایل</span>
-                                  </button>
-                                  <div className="flex items-center gap-3 text-right" dir="rtl">
-                                    <div className="p-2 rounded-lg bg-slate-900 border border-[#202738] text-slate-300">
-                                      {isVideoType ? <Video className="w-4 h-4 text-cyan-400" /> : <Music className="w-4 h-4 text-purple-400" />}
-                                    </div>
-                                    <div>
-                                      <p className="text-xs font-bold text-slate-200 line-clamp-1 max-w-[240px] sm:max-w-[320px]">{file.name}</p>
-                                      <p className="text-[10px] text-slate-500 font-semibold mt-0.5">{fileSizeMb}</p>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleColabDriveImport(file.path, file.name)}
+                                      className="px-3.5 py-2 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 active:scale-95 text-slate-950 font-extrabold text-xs rounded-lg transition-all shadow-md shadow-cyan-500/10 hover:shadow-cyan-500/20 cursor-pointer flex items-center gap-1.5 shrink-0"
+                                    >
+                                      <Sparkles className="w-3.5 h-3.5" />
+                                      <span>انتخاب و دوبله</span>
+                                    </button>
+
+                                    <div className="flex items-center gap-3 text-right overflow-hidden ml-3" dir="rtl">
+                                      <div className="p-2 rounded-lg bg-slate-900 border border-[#202738] text-slate-300 shrink-0">
+                                        {file.isVideo ? (
+                                          <Video className="w-4 h-4 text-cyan-400" />
+                                        ) : (
+                                          <Music className="w-4 h-4 text-purple-400" />
+                                        )}
+                                      </div>
+                                      <div className="overflow-hidden">
+                                        <p className="text-xs font-bold text-slate-200 truncate max-w-[220px] sm:max-w-[340px]" title={file.name}>
+                                          {file.name}
+                                        </p>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                          <span className="text-[10px] text-cyan-400/90 font-mono font-bold uppercase">{file.ext.replace(".", "")}</span>
+                                          <span className="text-[10px] text-slate-500 font-semibold">• {file.sizeFormatted}</span>
+                                        </div>
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
-                              );
-                            })}
+                                ))}
+                            </div>
                           </div>
                         )}
                       </div>
+                    </div>
+                  ) : (
+                    /* Mode 2: Google OAuth Sign In */
+                    <div>
+                      {!driveUser ? (
+                        /* Google Sign In Call-To-Action */
+                        <div className="text-center py-6 flex flex-col items-center justify-center max-w-lg mx-auto">
+                          <div className="w-16 h-16 rounded-full bg-cyan-950/40 text-cyan-400 flex items-center justify-center mb-4 border border-cyan-800/30">
+                            <Cloud className="w-7 h-7" />
+                          </div>
+                          <h3 className="text-lg font-bold mb-2">اتصال با حساب گوگل (Google OAuth)</h3>
+                          <p className="text-xs text-slate-400 leading-relaxed mb-6" dir="rtl">
+                            برای محیط‌هایی که دسترسی مستقیم به پنجره پاپ‌آپ گوگل دارند، می‌توانید مستقیماً وارد حساب گوگل شوید. (در محیط‌های تونل شده مانند Gradio یا Cloudflare، تب «مرورگر مستقیم درایو در کولب» پیشنهاد می‌شود).
+                          </p>
+                          <button
+                            onClick={handleDriveSignIn}
+                            disabled={isDriveLoading}
+                            className="flex items-center gap-3 px-6 py-3.5 bg-white hover:bg-slate-100 text-slate-900 rounded-xl font-bold text-xs transition-all active:scale-98 shadow-xl shadow-white/5 cursor-pointer disabled:opacity-50"
+                          >
+                            {isDriveLoading ? (
+                              <Loader2 className="w-4 h-4 animate-spin text-slate-900" />
+                            ) : (
+                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
+                                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.85z" fill="#FBBC05" />
+                                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.85c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                              </svg>
+                            )}
+                            <span>ورود با حساب گوگل و انتخاب فایل</span>
+                          </button>
+                        </div>
+                      ) : (
+                        /* Drive Connected View - Files list */
+                        <div className="flex flex-col gap-4">
+                          {/* Connection Header bar */}
+                          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-[#131722] border border-[#202738] rounded-xl px-4 py-3" dir="rtl">
+                            <div className="flex items-center gap-3">
+                              {driveUser.photoURL ? (
+                                <img src={driveUser.photoURL} alt="Avatar" className="w-8 h-8 rounded-full border border-cyan-500/30" referrerPolicy="no-referrer" />
+                              ) : (
+                                <div className="w-8 h-8 rounded-full bg-cyan-950 text-cyan-400 flex items-center justify-center font-bold text-xs">
+                                  {driveUser.email ? driveUser.email[0].toUpperCase() : "G"}
+                                </div>
+                              )}
+                              <div className="text-right">
+                                <p className="text-xs font-bold text-slate-100">{driveUser.displayName || "کاربر گوگل"}</p>
+                                <p className="text-[10px] text-slate-400">{driveUser.email}</p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={handleDriveSignOut}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 hover:text-red-400 rounded-lg text-[10px] font-bold text-slate-300 transition-all cursor-pointer"
+                            >
+                              <LogOut className="w-3.5 h-3.5" />
+                              <span>خروج از حساب</span>
+                            </button>
+                          </div>
+
+                          {/* Search Bar & Refresh */}
+                          <div className="flex gap-2">
+                            <div className="relative flex-1">
+                              <input
+                                type="text"
+                                placeholder="جستجو در فایل‌های گوگل درایو..."
+                                value={driveSearchQuery}
+                                onChange={(e) => setDriveSearchQuery(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && driveToken) {
+                                    fetchDriveFiles(driveToken, driveSearchQuery);
+                                  }
+                                }}
+                                className="w-full bg-[#131722] border border-[#202738] rounded-xl pl-3 pr-10 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 text-right"
+                                dir="rtl"
+                              />
+                              <Search className="absolute right-3.5 top-3 w-4 h-4 text-slate-500" />
+                            </div>
+                            <button
+                              onClick={() => driveToken && fetchDriveFiles(driveToken, driveSearchQuery)}
+                              disabled={isDriveLoading}
+                              className="px-4 bg-[#131722] hover:bg-slate-800 border border-[#202738] rounded-xl text-xs font-semibold text-slate-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              {isDriveLoading ? <Loader2 className="w-4 h-4 animate-spin text-slate-400" /> : "جستجو"}
+                            </button>
+                          </div>
+
+                          {/* Drive error box */}
+                          {driveError && (
+                            <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-xl text-xs text-right" dir="rtl">
+                              {driveError}
+                            </div>
+                          )}
+
+                          {/* Files list container */}
+                          <div className="border border-[#202738] bg-[#10141e] rounded-xl overflow-hidden max-h-[300px] overflow-y-auto">
+                            {isDriveLoading ? (
+                              <div className="py-16 text-center flex flex-col items-center justify-center gap-2">
+                                <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+                                <p className="text-xs text-slate-400">در حال دریافت لیست فایل‌های ویدیویی و صوتی گوگل درایو شما...</p>
+                              </div>
+                            ) : driveFiles.length === 0 ? (
+                              <div className="py-16 text-center text-slate-400 px-6">
+                                <p className="text-xs font-bold mb-1">هیچ فایل ویدیو یا صوتی پیدا نشد!</p>
+                                <p className="text-[10px] text-slate-500 max-w-xs mx-auto leading-relaxed">
+                                  مطمئن شوید فایل‌های با پسوند ویدیویی (MP4, MKV) یا صوتی (MP3, WAV) در روت یا پوشه‌های درایو شما آپلود شده‌اند.
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="divide-y divide-[#1b202c]">
+                                {driveFiles.map((file) => {
+                                  const isVideoType = file.mimeType?.startsWith("video/") || file.name.endsWith(".mp4") || file.name.endsWith(".mkv") || file.name.endsWith(".avi");
+                                  const fileSizeMb = file.size ? (parseInt(file.size, 10) / (1024 * 1024)).toFixed(1) + " MB" : "اندازه نامشخص";
+                                  return (
+                                    <div
+                                      key={file.id}
+                                      className="flex items-center justify-between p-3.5 hover:bg-[#131722] transition-colors"
+                                    >
+                                      <button
+                                        onClick={() => handleDriveImport(file)}
+                                        className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 font-extrabold text-xs rounded-lg transition-all shadow-md shadow-cyan-500/10 hover:shadow-cyan-500/20 cursor-pointer flex items-center gap-1.5"
+                                      >
+                                        <Sparkles className="w-3.5 h-3.5" />
+                                        <span>پردازش فایل</span>
+                                      </button>
+                                      <div className="flex items-center gap-3 text-right" dir="rtl">
+                                        <div className="p-2 rounded-lg bg-slate-900 border border-[#202738] text-slate-300">
+                                          {isVideoType ? <Video className="w-4 h-4 text-cyan-400" /> : <Music className="w-4 h-4 text-purple-400" />}
+                                        </div>
+                                        <div>
+                                          <p className="text-xs font-bold text-slate-200 line-clamp-1 max-w-[240px] sm:max-w-[320px]">{file.name}</p>
+                                          <p className="text-[10px] text-slate-500 font-semibold mt-0.5">{fileSizeMb}</p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2461,31 +2897,35 @@ export default function App() {
                                 )}
                               </div>
 
-                              <a
-                                href={mediaBlobUrl || (betterResultUrl + (betterResultUrl.includes("?") ? "&download=true" : "?download=true"))}
-                                download={fileName ? `dubbed_${fileName}` : "dubbed_media.mp4"}
-                                className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-white font-bold text-xs rounded-lg flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/10 transition-all text-center"
-                              >
-                                <Download className="w-4 h-4" />
-                                دانلود ویدیوی دوبله شده
-                              </a>
+                              <div className="flex flex-col gap-2 w-full">
+                                <a
+                                  href={mediaBlobUrl || (betterResultUrl + (betterResultUrl.includes("?") ? "&download=true" : "?download=true"))}
+                                  download={fileName ? `dubbed_${fileName}` : "dubbed_media.mp4"}
+                                  className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-white font-bold text-xs rounded-lg flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/10 transition-all text-center"
+                                >
+                                  <Download className="w-4 h-4" />
+                                  دانلود ویدیوی دوبله شده
+                                </a>
 
-                              {driveToken && (
-                                <div className="p-3 bg-cyan-950/20 border border-cyan-800/20 rounded-lg text-xs flex flex-col gap-1 text-right" dir="rtl">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveToColabDrive(getFileNameFromUrl(activeJob.resultUrl || ""), "main")}
+                                  disabled={isSavingToDrive["main"]}
+                                  className="w-full py-2 bg-slate-800 hover:bg-cyan-950/60 hover:border-cyan-500/40 border border-[#202738] text-cyan-300 font-bold text-xs rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                                >
                                   {isSavingToDrive["main"] ? (
-                                    <div className="flex items-center gap-2 text-cyan-400 font-bold">
-                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                      <span>در حال ذخیره خودکار ویدیو در گوگل درایو شما...</span>
-                                    </div>
-                                  ) : saveToDriveResult["main"] ? (
-                                    <div className="flex items-start gap-2">
-                                      <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 flex-shrink-0" />
-                                      <div>
-                                        <p className="font-bold text-emerald-400">ذخیره خودکار ویدیو با موفقیت انجام شد</p>
-                                        <p className="text-[10px] text-slate-300 mt-0.5">{saveToDriveResult["main"]}</p>
-                                      </div>
-                                    </div>
-                                  ) : null}
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <HardDrive className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>ذخیره مستقیم در گوگل درایو کولب (/content/drive/MyDrive)</span>
+                                </button>
+                              </div>
+
+                              {saveToDriveResult["main"] && (
+                                <div className="p-2.5 bg-cyan-950/30 border border-cyan-800/30 rounded-lg text-xs flex items-start gap-2 text-right" dir="rtl">
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+                                  <p className="text-[11px] text-slate-200">{saveToDriveResult["main"]}</p>
                                 </div>
                               )}
 
@@ -2504,31 +2944,35 @@ export default function App() {
                                     controls 
                                     className="w-full h-8 mt-1" 
                                   />
-                                  <a
-                                    href={audioBlobUrl || (activeJob.audioResultUrl + (activeJob.audioResultUrl.includes("?") ? "&download=true" : "?download=true"))}
-                                    download={fileName ? `dubbed_${fileName.replace(/\.[^/.]+$/, "")}.mp3` : "dubbed_audio.mp3"}
-                                    className="w-full py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[11px] rounded-lg flex items-center justify-center gap-1.5 transition-all text-center"
-                                  >
-                                    <Download className="w-3.5 h-3.5" />
-                                    دانلود نسخه صوتی دوبله شده (MP3)
-                                  </a>
+                                  <div className="flex flex-col gap-1.5 w-full">
+                                    <a
+                                      href={audioBlobUrl || (activeJob.audioResultUrl + (activeJob.audioResultUrl.includes("?") ? "&download=true" : "?download=true"))}
+                                      download={fileName ? `dubbed_${fileName.replace(/\.[^/.]+$/, "")}.mp3` : "dubbed_audio.mp3"}
+                                      className="w-full py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[11px] rounded-lg flex items-center justify-center gap-1.5 transition-all text-center"
+                                    >
+                                      <Download className="w-3.5 h-3.5" />
+                                      دانلود نسخه صوتی دوبله شده (MP3)
+                                    </a>
 
-                                  {driveToken && (
-                                    <div className="p-2.5 bg-cyan-950/20 border border-cyan-800/20 rounded-lg text-xs flex flex-col gap-1 text-right" dir="rtl">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSaveToColabDrive(getFileNameFromUrl(activeJob.audioResultUrl || ""), "audio")}
+                                      disabled={isSavingToDrive["audio"]}
+                                      className="w-full py-1.5 bg-[#171d2b] hover:bg-slate-800 text-slate-300 text-[10px] font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                                    >
                                       {isSavingToDrive["audio"] ? (
-                                        <div className="flex items-center gap-2 text-cyan-400 font-bold">
-                                          <Loader2 className="w-3 h-3 animate-spin" />
-                                          <span>در حال ذخیره خودکار صدا در گوگل درایو شما...</span>
-                                        </div>
-                                      ) : saveToDriveResult["audio"] ? (
-                                        <div className="flex items-start gap-1.5">
-                                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 mt-0.5 flex-shrink-0" />
-                                          <div>
-                                            <p className="font-bold text-emerald-400 text-[11px]">ذخیره خودکار نسخه صوتی با موفقیت انجام شد</p>
-                                            <p className="text-[9px] text-slate-300 mt-0.5">{saveToDriveResult["audio"]}</p>
-                                          </div>
-                                        </div>
-                                      ) : null}
+                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                      ) : (
+                                        <HardDrive className="w-3 h-3 text-cyan-400" />
+                                      )}
+                                      <span>ذخیره نسخه صوتی در درایو کولب</span>
+                                    </button>
+                                  </div>
+
+                                  {saveToDriveResult["audio"] && (
+                                    <div className="p-2 bg-cyan-950/30 border border-cyan-800/30 rounded-lg text-xs flex items-start gap-1.5 text-right" dir="rtl">
+                                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 mt-0.5 shrink-0" />
+                                      <p className="text-[10px] text-slate-200">{saveToDriveResult["audio"]}</p>
                                     </div>
                                   )}
                                 </div>
