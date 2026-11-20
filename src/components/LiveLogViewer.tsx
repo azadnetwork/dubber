@@ -49,7 +49,7 @@ export const LiveLogViewer: React.FC<LiveLogViewerProps> = ({
       if (line.includes("gemini-3.6-flash")) return "gemini-3.6-flash";
       if (line.includes("gemini-3.5-flash-lite")) return "gemini-3.5-flash-lite";
       if (line.includes("gemini-3.1-flash-lite")) return "gemini-3.1-flash-lite";
-      if (line.includes("gemini-3.1-flash-live-preview")) return "gemini-3.1-flash-live-preview";
+      if (line.includes("gemini-3.8-live")) return "gemini-3.8-live";
       if (line.includes("gemini-3.1-flash-tts-preview")) return "gemini-3.1-flash-tts-preview";
     }
     return null;
@@ -62,7 +62,7 @@ export const LiveLogViewer: React.FC<LiveLogViewerProps> = ({
       .replace(/(gemini-3\.6-flash)/g, '<span class="text-indigo-400 font-bold">$1</span>')
       .replace(/(gemini-3\.5-flash-lite)/g, '<span class="text-emerald-400 font-bold">$1</span>')
       .replace(/(gemini-3\.1-flash-lite)/g, '<span class="text-teal-400 font-bold">$1</span>')
-      .replace(/(gemini-3\.1-flash-live-preview)/g, '<span class="text-amber-400 font-bold">$1</span>')
+      .replace(/(gemini-3\.8-live)/g, '<span class="text-amber-400 font-bold">$1</span>')
       .replace(/(gemini-3\.1-flash-tts-preview)/g, '<span class="text-purple-400 font-bold">$1</span>')
       .replace(/(\[کارگر \d+\])/g, '<span class="text-sky-300 font-mono bg-sky-950/60 px-1 py-0.5 rounded text-[11px]">$1</span>')
       .replace(/(\[بخش \d+\/\d+\])/g, '<span class="text-yellow-300 font-mono bg-yellow-950/60 px-1 py-0.5 rounded text-[11px]">$1</span>')
@@ -188,4 +188,3 @@ export const LiveLogViewer: React.FC<LiveLogViewerProps> = ({
     </div>
   );
 };
-
